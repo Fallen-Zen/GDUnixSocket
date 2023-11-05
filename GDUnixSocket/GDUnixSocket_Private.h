@@ -34,19 +34,14 @@
 extern NSString * const kGDDummySocketPath;
 
 @interface NSError (GDUnixSocket)
-
 + (NSError *)gduds_errorForCode:(GDUnixSocketError)code;
 + (NSError *)gduds_errorForCode:(GDUnixSocketError)code info:(NSString *)infoString;
-
 @end
 
-@interface GDUnixSocket ()
-
+@interface GDUnixSocket()
 @property (atomic, readwrite, assign) GDUnixSocketState state;
-
 - (NSString *)lastErrorInfo;
 - (NSError *)checkForBadSocket;
 - (dispatch_fd_t)fd;
 - (void)setFd:(dispatch_fd_t)fd;
-
 @end

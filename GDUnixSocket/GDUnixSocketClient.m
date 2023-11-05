@@ -2,6 +2,7 @@
 //  GDUnixSocketClient.m
 //
 //  Copyright © 2016 Alexey Gordiyenko. All rights reserved.
+//  Changes, cleanup and optimisation by Piotr Panasewicz.
 //
 
 /*
@@ -40,7 +41,6 @@
 @implementation GDUnixSocketClient
 
 #pragma mark - Public Methods
-
 - (BOOL)connectWithAutoRead:(BOOL)autoRead error:(NSError **)error {
     BOOL retVal = NO;
     NSError *retError = nil;
@@ -65,28 +65,22 @@
             }
         }
     }
-    
+
     if (error) {
         *error = retError;
     }
-    
+
     if (retVal) {
         self.state = GDUnixSocketStateConnected;
         if (autoRead) {
             [self readLoop];
         }
     }
-    
+
     return retVal;
 }
 
-- (void)connectWithAutoRead:(BOOL)autoRead completion:(void(^)(NSError *error))completion {
-    // TODO: Implement with non-blocking connect & select/poll.
-    NSAssert(NO, @"Sorry, this one is not implemented");
-}
-
 #pragma mark - Overrides
-
 - (NSData *)readWithError:(NSError **)error {
     NSError *readError = nil;
     NSData *data = [super readWithError:&readError];
@@ -99,23 +93,22 @@
             [self.delegate unixSocketClient:self didReceiveData:data];
         }
     }
-    
+
     if (error) {
         *error = readError;
     }
-    
+
     return data;
 }
 
 #pragma mark - Private Methods
-
 - (void)readLoop {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSData *readData = nil;
         do {
             readData = [self readWithError:nil];
         } while (readData);
-        
+
         [self close];
     });
 }

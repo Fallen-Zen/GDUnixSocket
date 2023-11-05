@@ -2,6 +2,7 @@
 //  GDUnixSocketServer.m
 //
 //  Copyright © 2016 Alexey Gordiyenko. All rights reserved.
+//  Changes, cleanup and optimisation by Piotr Panasewicz.
 //
 
 /*
@@ -41,7 +42,7 @@
 
 const int kGDUnixSocketServerMaxConnectionsDefault = 5;
 
-@interface GDUnixSocketServer ()
+@interface GDUnixSocketServer()
 
 @property (nonatomic, readonly, strong) NSLock *closeLock;
 @property (nonatomic, readonly, strong) NSMutableDictionary *connectedClients;
@@ -57,59 +58,51 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
 }
 
 - (BOOL)listenWithMaxConnections:(int)maxConnections error:(NSError **)error {
-    BOOL(^failureDeferBlock)(NSError *) = ^BOOL(NSError *retError) {
-        if (error) {
-            *error = retError;
-        }
-        
+    dispatch_fd_t socketFd = socket(AF_UNIX, SOCK_STREAM, 0);
+    [self setFd:socketFd];
+    if (socketFd == kGDBadSocketFD) {
+        *error = [NSError gduds_errorForCode:GDUnixSocketErrorBadSocket info:[self lastErrorInfo]];
         return NO;
-    };
-    
-    dispatch_fd_t socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    [self setFd:socket_fd];
-    if (socket_fd == kGDBadSocketFD) {
-        return failureDeferBlock([NSError gduds_errorForCode:GDUnixSocketErrorBadSocket info:[self lastErrorInfo]]);
     }
-    
-    const char *socket_path = [self.socketPath cStringUsingEncoding:NSUTF8StringEncoding];
-    
+
+    const char *socketPath = [[self socketPath] cStringUsingEncoding:NSUTF8StringEncoding];
+
     struct sockaddr_un address = {};
     address.sun_family = AF_UNIX;
-    strncpy(address.sun_path, socket_path, sizeof(address.sun_path) - 1);
-    if (0 != strcmp(address.sun_path, socket_path)) {
+    strncpy(address.sun_path, socketPath, sizeof(address.sun_path) - 1);
+    if (0 != strcmp(address.sun_path, socketPath)) {
         [self closeSilently];
-        return failureDeferBlock([NSError gduds_errorForCode:GDUnixSocketErrorListen info:@"The socket path is inconsistent"]);
+        *error = [NSError gduds_errorForCode:GDUnixSocketErrorListen info:@"The socket path is inconsistent"];
+        return NO;
     }
-    
-    socket_path = address.sun_path;
-    
-    [self unlinkSocket:socket_path];
-    
-    if (0 != bind(socket_fd, (struct sockaddr *)&address, sizeof(struct sockaddr_un))) {
+
+    socketPath = address.sun_path;
+
+    [self unlinkSocket:socketPath];
+
+    if (0 != bind(socketFd, (struct sockaddr *)&address, sizeof(struct sockaddr_un))) {
         [self closeSilently];
-        return failureDeferBlock([NSError gduds_errorForCode:GDUnixSocketErrorBind info:[self lastErrorInfo]]);
+        *error = [NSError gduds_errorForCode:GDUnixSocketErrorBind info:[self lastErrorInfo]];
+        return NO;
     }
-    
-    if (0 != listen(socket_fd, maxConnections ?: kGDUnixSocketServerMaxConnectionsDefault)) {
+
+    if (0 != listen(socketFd, maxConnections ?: kGDUnixSocketServerMaxConnectionsDefault)) {
         [self closeSilently];
-        return failureDeferBlock([NSError gduds_errorForCode:GDUnixSocketErrorListen info:[self lastErrorInfo]]);
+        *error = [NSError gduds_errorForCode:GDUnixSocketErrorListen info:[self lastErrorInfo]];
+        return NO;
     }
-    
-    if (error) {
-        *error = nil;
-    }
-    
+
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.001 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         [weakSelf mainLoop];
     });
-    
+
     self.state = GDUnixSocketStateListening;
-    
+
     if ([self.delegate respondsToSelector:@selector(unixSocketServerDidStartListening:)]) {
         [self.delegate unixSocketServerDidStartListening:self];
     }
-    
+
     return YES;
 }
 
@@ -118,7 +111,7 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
         if (error) {
             *error = nil;
         }
-        
+
         GDUnixSocket *client = self.connectedClients[clientID];
         if (!client) {
             if (error) {
@@ -127,7 +120,7 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
             
             return -1;
         }
-        
+
         return [client writeData:data error:error];
     }
 }
@@ -163,36 +156,35 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
     BOOL retVal = NO;
     // First, close all active clients.
     [self removeAllClients];
-    
+
     // Then close the listening socket.
     [self.closeLock lock];
     NSError *retError = [self unlinkSocket];
     if (!retError) {
         retVal = [super closeWithError:&retError];
     }
-    
+
     if (informDelegate && [self.delegate respondsToSelector:@selector(unixSocketServerDidClose:error:)]) {
         [self.delegate unixSocketServerDidClose:self error:retError];
     }
-    
+
     [self.closeLock unlock];
-    
+
     if (error) {
         *error = retError;
     }
-    
+
     return retVal;
 }
 
 #pragma mark - Private Methods
-
 - (void)readOnConnection:(GDUnixSocket *)clientConnection {
     NSError *error;
     do {
         if (![self clientExists:clientConnection]) {
             break;
         }
-        
+
         NSData *data = [clientConnection readWithError:&error];
         if (!data) {
             if ([self clientExists:clientConnection]) {
@@ -205,7 +197,7 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
                         [self.delegate unixSocketServer:self clientWithIDDidDisconnect:clientConnection.uniqueID];
                     }
                 }
-                
+
                 [self removeAndCloseClient:clientConnection];
             }
         } else {
@@ -218,15 +210,15 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
 
 - (void)mainLoop {
     while (true) {
-        dispatch_fd_t socket_fd = [self fd];
-        if (socket_fd == kGDBadSocketFD) {
+        dispatch_fd_t socketFd = [self fd];
+        if (socketFd == kGDBadSocketFD) {
             break;
         }
-        
-        struct sockaddr_un connection_addr = {};
-        socklen_t connection_addr_len;
-        dispatch_fd_t connection_fd = accept(socket_fd, (struct sockaddr *)&connection_addr, &connection_addr_len);
-        if (connection_fd == kGDBadSocketFD) {
+
+        struct sockaddr_un connectionAddr = {};
+        socklen_t connectionAddrLen;
+        dispatch_fd_t connectionFd = accept(socketFd, (struct sockaddr *)&connectionAddr, &connectionAddrLen);
+        if (connectionFd == kGDBadSocketFD) {
             [self.closeLock lock];
             if ([self fd] != kGDBadSocketFD) {
                 // If accept failed, that means some error happened. Close listening socket.
@@ -234,7 +226,7 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
                     NSError *error = [NSError gduds_errorForCode:GDUnixSocketErrorAccept info:[self lastErrorInfo]];
                     [self.delegate unixSocketServerDidFailToAcceptConnection:self error:error];
                 }
-                
+
                 [self.closeLock unlock];
                 [self close];
             } else {
@@ -243,13 +235,13 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
             break;
         } else {
             GDUnixSocket *newConnection = [[GDUnixSocket alloc] initWithSocketPath:kGDDummySocketPath];
-            [newConnection setFd:connection_fd];
+            [newConnection setFd:connectionFd];
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 [self readOnConnection:newConnection];
             });
-            
+
             [self addClient:newConnection];
-            
+
             if ([self.delegate respondsToSelector:@selector(unixSocketServer:didAcceptClientWithID:)]) {
                 [self.delegate unixSocketServer:self didAcceptClientWithID:newConnection.uniqueID];
             }
@@ -273,12 +265,11 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
             }
         }
     }
-    
+
     return nil;
 }
 
 #pragma mark - Clients Related
-
 - (void)addClient:(GDUnixSocket *)client {
     @synchronized(self) {
         if (!client) {
@@ -303,7 +294,7 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
             return error;
         }
     }
-    
+
     return nil;
 }
 
@@ -312,13 +303,12 @@ const int kGDUnixSocketServerMaxConnectionsDefault = 5;
         for (GDUnixSocket *client in self.connectedClients.allValues) {
             [client close];
         }
-        
+
         [self.connectedClients removeAllObjects];
     }
 }
 
 #pragma mark - Life Cycle
-
 - (instancetype)initWithSocketPath:(NSString *)socketPath  andFragmentSize:(size_t)fragmentSize {
     self = [super initWithSocketPath:socketPath andFragmentSize:fragmentSize];
     if (self) {

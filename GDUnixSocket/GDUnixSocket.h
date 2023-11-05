@@ -2,6 +2,7 @@
 //  GDUnixSocket.h
 //
 //  Copyright © 2016 Alexey Gordiyenko. All rights reserved.
+//  Changes, cleanup and optimisation by Piotr Panasewicz.
 //
 
 /*

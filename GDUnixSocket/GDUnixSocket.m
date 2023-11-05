@@ -2,6 +2,7 @@
 //  GDUnixSocket.m
 //
 //  Copyright © 2016 Alexey Gordiyenko. All rights reserved.
+//  Changes, cleanup and optimisation by Piotr Panasewicz.
 //
 
 /*
@@ -34,13 +35,11 @@
 #import <sys/socket.h>
 
 #pragma mark - Constants
-
 const int kGDBadSocketFD = -1;
 NSString * const kGDUnixSocketErrDomain = @"com.coffellas.GDUnixSocket";
 NSString * const kGDDummySocketPath = @"(dummy)";
 
 #pragma mark - NSError
-
 @implementation NSError (GDUnixSocket)
 
 + (NSError *)gduds_errorForCode:(GDUnixSocketError)code {
@@ -80,18 +79,17 @@ NSString * const kGDDummySocketPath = @"(dummy)";
         case GDUnixSocketErrorUnknownClient:
             localizedDescription = @"Unknown client. It is either disconnected or never existed";
             break;
-            
         default:
             localizedDescription = @"Unknown Error";
             break;
     }
-    
+
     if (infoString.length) {
         localizedDescription = [NSString stringWithFormat:@"%@. %@", localizedDescription, infoString];
     }
-    
+
     GDUnixSocketLog(@"Error: %@", localizedDescription);
-    
+
     return [NSError errorWithDomain:kGDUnixSocketErrDomain code:code userInfo:@{NSLocalizedDescriptionKey: localizedDescription}];
 }
 
@@ -99,7 +97,7 @@ NSString * const kGDDummySocketPath = @"(dummy)";
 
 #pragma mark - GDUnixSocket
 
-@interface GDUnixSocket () {
+@interface GDUnixSocket() {
     dispatch_fd_t _fd;
 }
 
@@ -117,7 +115,7 @@ NSString * const kGDDummySocketPath = @"(dummy)";
             _uniqueID = [NSUUID UUID].UUIDString;
         }
     }
-    
+
     return _uniqueID;
 }
 
@@ -159,7 +157,7 @@ NSString * const kGDDummySocketPath = @"(dummy)";
     if (self.state == GDUnixSocketStateDisconnected) {
         return YES;
     }
-    
+
     BOOL retVal = NO;
     NSError *retError = [self checkForBadSocket];
     if (retError) {
@@ -172,58 +170,58 @@ NSString * const kGDDummySocketPath = @"(dummy)";
         } else {
             GDUnixSocketLog(@"closed socket [%d]", [self fd]);
         }
-        
+
         [self setFd:kGDBadSocketFD];
     }
-    
+
     if (error) {
         *error = retError;
     }
-    
+
     if (retVal) {
         self.state = GDUnixSocketStateDisconnected;
     }
-    
+
     return retVal;
 }
 
 #pragma mark - Private Methods
 
-- (NSData *)readFromSocket:(dispatch_fd_t)socket_fd error:(NSError **)error {
+- (NSData *)readFromSocket:(dispatch_fd_t)socketFd error:(NSError **)error {
     NSData *retVal = nil;
     NSError *retError = nil;
-    size_t buffer_size = self.fragmentSize;
-    uint8_t *buffer = calloc(buffer_size, sizeof(uint8_t));
-    ssize_t bytes_read = read(socket_fd, buffer, buffer_size);
-    if (bytes_read == -1) {
-        retError = [NSError gduds_errorForCode:GDUnixSocketErrorSocketRead info:[self lastErrorInfoForSocket:socket_fd]];
+    size_t bufferSize = self.fragmentSize;
+    uint8_t *buffer = calloc(bufferSize, sizeof(uint8_t));
+    ssize_t bytesRead = read(socketFd, buffer, bufferSize);
+    if (bytesRead == -1) {
+        retError = [NSError gduds_errorForCode:GDUnixSocketErrorSocketRead info:[self lastErrorInfoForSocket:socketFd]];
     } else {
-        GDUnixSocketLog(@"read %zd bytes from socket [%d]: %s", bytes_read, socket_fd, buffer);
+        GDUnixSocketLog(@"read %zd bytes from socket [%d]: %s", bytesRead, socketFd, buffer);
     }
-    
-    if (bytes_read > 0) {
-        retVal = [NSData dataWithBytesNoCopy:buffer length:bytes_read freeWhenDone:YES];
+
+    if (bytesRead > 0) {
+        retVal = [NSData dataWithBytesNoCopy:buffer length:bytesRead freeWhenDone:YES];
     } else {
         free(buffer);
     }
-    
+
     if (error) {
         *error = retError;
     }
-    
+
     return retVal;
 }
 
-- (ssize_t)write:(NSData *)data toSocket:(dispatch_fd_t)socket_fd error:(NSError **)error {
+- (ssize_t)write:(NSData *)data toSocket:(dispatch_fd_t)socketFd error:(NSError **)error {
     if (error) {
         *error = nil;
     }
-    
+
     if (!data || !data.length) {
         return 0;
     }
-    
-    NSError *socketError = [self checkForBadSocket:socket_fd];
+
+    NSError *socketError = [self checkForBadSocket:socketFd];
     if (socketError) {
         if (error) {
             *error = socketError;
@@ -231,16 +229,16 @@ NSString * const kGDDummySocketPath = @"(dummy)";
         
         return -1;
     }
-    
+
     const void *buffer = data.bytes;
     size_t length = data.length;
-    
-    ssize_t written = write(socket_fd, buffer, length);
+
+    ssize_t written = write(socketFd, buffer, length);
     if (-1 == written && error) {
-        *error = [NSError gduds_errorForCode:GDUnixSocketErrorSocketWrite info:[self lastErrorInfoForSocket:socket_fd]];
+        *error = [NSError gduds_errorForCode:GDUnixSocketErrorSocketWrite info:[self lastErrorInfoForSocket:socketFd]];
     }
-    
-    GDUnixSocketLog(@"written %zd bytes on socket [%d]: %s", written, socket_fd, buffer);
+
+    GDUnixSocketLog(@"written %zd bytes on socket [%d]: %s", written, socketFd, buffer);
     return written;
 }
 
@@ -248,25 +246,33 @@ NSString * const kGDDummySocketPath = @"(dummy)";
     return [self lastErrorInfoForSocket:[self fd]];
 }
 
-- (NSString *)lastErrorInfoForSocket:(dispatch_fd_t)socket_fd {
+- (NSString *)lastErrorInfoForSocket:(dispatch_fd_t)socketFd {
     int error;
-    // TODO: Switch to `getsockopt`. The code commented out below is not accurate.
-//    socklen_t len = sizeof(error);
-//    if (-1 == getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &error, &len)) {
-        error = errno;
-//    }
-    return [NSString stringWithFormat:@"fd: %d. errno: %d. %s", socket_fd, error, strerror(error)];
+    socklen_t len = sizeof(error);
+
+    if (getsockopt(socketFd, SOL_SOCKET, SO_ERROR, &error, &len) == -1) {
+        return [NSString stringWithFormat:@"Socket '%d' error '%s'.", socketFd, strerror(error)];
+    } else {
+        // If 'getsockopt' succeeds, it means it was able to retrieve the value of the SO_ERROR option.
+        // Check the value of the retrieved error
+        if (error != 0) {
+            // Handle the socket error
+            return [NSString stringWithFormat:@"Socket error '%s'.", strerror(error)];
+        }
+    }
+
+    return nil;
 }
 
 - (NSError *)checkForBadSocket {
     return [self checkForBadSocket:[self fd]];
 }
 
-- (NSError *)checkForBadSocket:(dispatch_fd_t)socket_fd {
-    if (socket_fd == kGDBadSocketFD) {
+- (NSError *)checkForBadSocket:(dispatch_fd_t)socketFd {
+    if (socketFd == kGDBadSocketFD) {
         return [NSError gduds_errorForCode:GDUnixSocketErrorBadSocket];
     }
-    
+
     return nil;
 }
 
@@ -291,43 +297,42 @@ NSString * const kGDDummySocketPath = @"(dummy)";
 }
 
 #pragma mark - Life Cycle
-
 - (instancetype)initWithSocketPath:(NSString *)socketPath {
     return [self initWithSocketPath:socketPath andFragmentSize:256];
 }
 
 - (instancetype)initWithSocketPath:(NSString *)socketPath andFragmentSize:(size_t)fragmentSize {
     NSParameterAssert(socketPath);
-    
+
     self = [super init];
     if (self) {
         _fd = kGDBadSocketFD;
-        
+
         if (!socketPath.length) {
             return nil;
         }
-        
+
         if (![socketPath isEqualToString:kGDDummySocketPath]) {
             NSString *standardizedPath = [socketPath stringByStandardizingPath]; // Returns self if an error occurs.
             if (![standardizedPath isEqualToString:socketPath]) {
                 return nil;
             }
-            
+
             if (![standardizedPath rangeOfString:@"/"].length) {
                 return nil;
             }
         }
-        
+
         struct sockaddr_un address;
-        size_t allowed_size = sizeof(address.sun_path) - 1;
-        if (strlen([socketPath cStringUsingEncoding:NSUTF8StringEncoding]) > allowed_size) {
+        size_t allowedSize = sizeof(address.sun_path) - 1;
+        if (strlen([socketPath cStringUsingEncoding:NSUTF8StringEncoding]) > allowedSize) {
             return nil;
         }
 
         _socketPath = [socketPath copy];
         _fragmentSize = fragmentSize;
     }
-    
+
     return self;
 }
 
