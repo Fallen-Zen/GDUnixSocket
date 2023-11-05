@@ -131,7 +131,6 @@ Define `GD_UNIX_SOCKET_DEBUG` macro to see additional debug information.
 
 ## TODO
 - It would be nice to have a non-blocking implementation rather then calling blocking functions asynchronously on dispatch queues
-- Last error is retieved using `errno`, need to switch to `getsockopt(..., ..., SO_ERROR, ..., ...)`
 
 ## License
 Published under MIT license. If you have any feature requests, please create an issue. Smart pull requests are also welcome.
